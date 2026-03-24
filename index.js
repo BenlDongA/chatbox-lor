@@ -53,31 +53,19 @@ const Message = mongoose.model("Message", messageSchema);
 
 // ===== Gemini =====
 async function callGemini(prompt) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: prompt }]
-        }
-      ]
+      contents: [{ role: "user", parts: [{ text: prompt }] }]
     })
   });
 
-  const data = await res.json();
-
-  console.log("GEMINI RAW:", data); // 👈 debug
-
-  if (!res.ok || data.error) {
-    throw new Error(data.error?.message || "Gemini failed");
-  }
-
-  return data;
+  return await res.json();
 }
+
 // ==========================
 // 🔥 CHAT API (UPDATED)
 // ==========================
