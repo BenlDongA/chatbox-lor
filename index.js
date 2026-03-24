@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
+import mongoose from "mongoose";
 
 const app = express();
 app.use(cors());
@@ -10,12 +11,32 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 5000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const MONGO_URI = process.env.MONGO_URI;
 
-const MAX_RETRY = 3;      // số lần retry khi quá tải
-const RETRY_DELAY = 1000; // ms
-const MAX_HISTORY = 5;    // chỉ gửi 5 tin nhắn gần nhất để giảm token
+// ===== MongoDB connect =====
+mongoose.connect(MONGO_URI)
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch(err => console.error("MongoDB error:", err));
 
-// Hàm gọi Gemini với retry
+// ===== Schema =====
+const messageSchema = new mongoose.Schema({
+  conversationId: String,
+  role: String, // 'user' | 'assistant'
+  content: String,
+  timestamp: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+const Message = mongoose.model("Message", messageSchema);
+
+// ===== Config =====
+const MAX_RETRY = 3;
+const RETRY_DELAY = 1000;
+const MAX_HISTORY = 5;
+
+// ===== Call Gemini =====
 async function callGemini(contents, attempt = 1) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
@@ -30,10 +51,9 @@ async function callGemini(contents, attempt = 1) {
     });
 
     const data = await res.json();
-    
-    // Nếu quá tải, retry
+
     if (data.error && data.error.code === 503 && attempt < MAX_RETRY) {
-      console.warn(`Gemini overloaded. Retry #${attempt} after ${RETRY_DELAY}ms`);
+      console.warn(`⚠️ Gemini overloaded. Retry #${attempt}`);
       await new Promise(r => setTimeout(r, RETRY_DELAY));
       return callGemini(contents, attempt + 1);
     }
@@ -41,72 +61,103 @@ async function callGemini(contents, attempt = 1) {
     return data;
 
   } catch (err) {
-    console.error("Error calling Gemini:", err);
+    console.error("❌ Error calling Gemini:", err);
     throw err;
   }
 }
 
+// ===== CHAT API =====
 app.post("/api/chat", async (req, res) => {
-  const { messages } = req.body;
-  if (!messages) return res.status(400).json({ error: "Missing messages" });
+  const { message, conversationId } = req.body;
 
-  // chỉ lấy MAX_HISTORY tin nhắn gần nhất
-  const recentMessages = messages.slice(-MAX_HISTORY);
-  const contents = recentMessages.map(m => ({ parts: [{ text: m.content }] }));
+  if (!message || !conversationId) {
+    return res.status(400).json({ error: "Missing message or conversationId" });
+  }
 
   try {
-    const data = await callGemini(contents);
-    console.log("Gemini API response:", data);
+    // 1. Lưu message user
+    await Message.create({
+      conversationId,
+      role: "user",
+      content: message
+    });
 
-    // Nếu Gemini trả lỗi
+    // 2. Lấy history
+    const history = await Message.find({ conversationId })
+      .sort({ timestamp: 1 });
+
+    // 3. Giới hạn context
+    const recentMessages = history.slice(-MAX_HISTORY);
+
+    const contents = recentMessages.map(m => ({
+      role: m.role === "user" ? "user" : "model",
+      parts: [{ text: m.content }]
+    }));
+
+    // 4. Gọi Gemini
+    const data = await callGemini(contents);
+
     if (data.error) {
       return res.json({
-        choices: [
-          {
-            message: {
-              role: "assistant",
-              content: `❌ Lỗi từ Gemini: ${data.error.message || "Unknown error"}`,
-            }
-          }
-        ]
+        reply: `❌ Gemini error: ${data.error.message}`
       });
     }
 
-    // Lấy reply text từ candidates, join parts nếu là object
+    // 5. Lấy reply
     let botReplyText = "Gemini không trả kết quả";
 
-    if (data.candidates?.[0]?.content) {
-      const contentObj = data.candidates[0].content;
-      if (Array.isArray(contentObj.parts)) {
-        botReplyText = contentObj.parts.map(p => p.text).join(" ");
-      } else if (typeof contentObj === "string") {
-        botReplyText = contentObj;
-      }
+    if (data.candidates?.[0]?.content?.parts) {
+      botReplyText = data.candidates[0].content.parts
+        .map(p => p.text)
+        .join(" ");
     }
 
-    res.json({
-      choices: [
-        {
-          message: {
-            role: "assistant",
-            content: botReplyText
-          }
-        }
-      ]
+    // 6. Lưu bot reply
+    await Message.create({
+      conversationId,
+      role: "assistant",
+      content: botReplyText
     });
 
+    // 7. Trả về
+    res.json({ reply: botReplyText });
+
   } catch (err) {
-    res.json({
-      choices: [
-        {
-          message: {
-            role: "assistant",
-            content: "❌ Lỗi server khi gọi Gemini API."
-          }
-        }
-      ]
-    });
+    console.error(err);
+    res.json({ reply: "❌ Lỗi server" });
   }
 });
 
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+// ===== GET HISTORY =====
+app.get("/api/history/:conversationId", async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+
+    const messages = await Message.find({ conversationId })
+      .sort({ timestamp: 1 });
+
+    res.json(messages);
+
+  } catch (err) {
+    res.status(500).json({ error: "Error fetching history" });
+  }
+});
+
+// ===== DELETE CHAT =====
+app.delete("/api/history/:conversationId", async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+
+    await Message.deleteMany({ conversationId });
+
+    res.json({ message: "Deleted conversation" });
+
+  } catch (err) {
+    res.status(500).json({ error: "Delete failed" });
+  }
+});
+
+// ===== START SERVER =====
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
