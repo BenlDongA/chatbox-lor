@@ -24,6 +24,7 @@ mongoose.connect(MONGO_URI)
 
 // Conversation
 const conversationSchema = new mongoose.Schema({
+  _id: String, // 🔥 THÊM DÒNG NÀY
   userId: String,
   title: String,
   createdAt: {
@@ -94,14 +95,19 @@ app.post("/api/chat", async (req, res) => {
       .join("\n");
 
     // 3. Gọi Gemini
-    const data = await callGemini(context);
+   const data = await callGemini(context);
 
-    let reply = "Không có phản hồi";
+if (!data || data.error) {
+  console.error("Gemini error:", data);
+  return res.json({ reply: "❌ Gemini lỗi" });
+}
 
-    if (data?.candidates?.length > 0) {
-      const parts = data.candidates[0].content?.parts || [];
-      reply = parts.map(p => p.text).join(" ");
-    }
+   let reply = "Không có phản hồi";
+
+if (data?.candidates?.length > 0) {
+  const parts = data.candidates[0].content?.parts || [];
+  reply = parts.map(p => p.text).join(" ");
+}
 
     // 4. Lưu bot reply
     await Message.create({
