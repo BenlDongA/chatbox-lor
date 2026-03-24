@@ -1,4 +1,5 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
+dotenv.config();
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
@@ -12,7 +13,7 @@ app.use(bodyParser.json());
 const PORT = process.env.PORT || 5000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const MONGO_URI = process.env.MONGO_URI;
-
+console.log("MONGO_URI =", process.env.MONGO_URI);
 // ===== MongoDB connect =====
 mongoose.connect(MONGO_URI)
   .then(() => console.log("✅ MongoDB connected"))
